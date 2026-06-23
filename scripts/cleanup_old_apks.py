@@ -55,15 +55,17 @@ from typing import List, Set
 VERSION_MARKER = re.compile(r"-v\d[\d.()+\-]*\.apk$", re.IGNORECASE)
 
 
-def gh_release_assets(release: str) -> List[str]:
-    """Return APK asset names currently attached to the release."""
+def gh_release_assets(release: str) -> List[dict]:
+    """Return asset dicts (with 'name' + 'id') currently attached to the release.
+    Only APK assets are returned."""
     try:
         result = subprocess.run(
             ["gh", "release", "view", release, "--json", "assets"],
             capture_output=True, text=True, check=True,
         )
         assets = json.loads(result.stdout or "{}").get("assets", []) or []
-        return [a.get("name", "") for a in assets if a.get("name", "").endswith(".apk")]
+        return [a for a in assets if isinstance(a, dict)
+                and str(a.get("name", "")).endswith(".apk")]
     except Exception as e:
         print(f"⚠️  could not list release assets: {e}", file=sys.stderr)
         return []
@@ -88,16 +90,68 @@ def load_keep_set(keep_file: Path) -> Set[str]:
     return names
 
 
-def delete_asset(release: str, name: str) -> bool:
+def delete_asset_by_name(release: str, name: str) -> tuple:
+    """Delete a single asset by name using `gh release delete-asset`.
+    NOTE: `gh release delete <tag> <asset>` deletes the WHOLE release, not the
+    asset — that was the original bug. The correct subcommand is `delete-asset`.
+    Returns (ok, message)."""
     try:
-        subprocess.run(
-            ["gh", "release", "delete", release, name, "--yes"],
+        result = subprocess.run(
+            ["gh", "release", "delete-asset", release, name, "--yes"],
             capture_output=True, text=True, check=True,
         )
-        return True
+        return True, ""
+    except subprocess.CalledProcessError as e:
+        return False, (e.stderr or e.stdout or str(e)).strip()
     except Exception as e:
-        print(f"  ✗ failed to delete {name}: {e}", file=sys.stderr)
-        return False
+        return False, str(e)
+
+
+def delete_asset_by_id(name: str, asset_id: str) -> tuple:
+    """Fallback: delete an asset by its numeric ID via the REST API.
+    Used when `gh release delete-asset` is unavailable (older gh) or fails.
+    Returns (ok, message)."""
+    repo = _repo_slug()
+    if not repo:
+        return False, "GITHUB_REPOSITORY not set for API fallback"
+    try:
+        result = subprocess.run(
+            ["gh", "api", "-X", "DELETE",
+             f"repos/{repo}/releases/assets/{asset_id}"],
+            capture_output=True, text=True, check=True,
+        )
+        return True, ""
+    except subprocess.CalledProcessError as e:
+        return False, (e.stderr or e.stdout or str(e)).strip()
+    except Exception as e:
+        return False, str(e)
+
+
+def _repo_slug() -> str:
+    """Return 'owner/name' from the GITHUB_REPOSITORY env var, or ''."""
+    import os
+    return (os.environ.get("GITHUB_REPOSITORY") or "").strip()
+
+
+def delete_asset(release: str, name: str, asset_id: str = "") -> bool:
+    """Delete a single release asset. Tries `gh release delete-asset` first,
+    falls back to the REST API (by asset id) on failure. Returns True on
+    success. Every failure is logged to stderr but never fatal."""
+    ok, msg = delete_asset_by_name(release, name)
+    if ok:
+        return True
+    print(f"  ⚠️  delete-asset failed for {name}: {msg[:200]}", file=sys.stderr)
+
+    if asset_id:
+        ok2, msg2 = delete_asset_by_id(name, asset_id)
+        if ok2:
+            return True
+        print(f"  ⚠️  API fallback failed for {name} (id={asset_id}): {msg2[:200]}",
+              file=sys.stderr)
+    else:
+        print(f"  ⚠️  no asset id available for {name}; API fallback skipped",
+              file=sys.stderr)
+    return False
 
 
 def main() -> int:
@@ -109,9 +163,9 @@ def main() -> int:
     args = parser.parse_args()
 
     keep = load_keep_set(Path(args.keep_file))
-    current = gh_release_assets(args.release)
+    assets = gh_release_assets(args.release)  # list of {name, id, ...} dicts
 
-    if not current:
+    if not assets:
         print("No existing APK assets to clean up.")
         return 0
 
@@ -119,12 +173,13 @@ def main() -> int:
     # share a prefix when multiple arches of the same app are kept).
     keep_prefixes = {identity_prefix(n) for n in keep}
 
-    to_delete: List[str] = []
-    for name in current:
-        if name in keep:
-            continue  # explicitly kept
+    to_delete = []  # list of asset dicts
+    for asset in assets:
+        name = str(asset.get("name", ""))
+        if not name or name in keep:
+            continue  # explicitly kept (or unnamed)
         if identity_prefix(name) in keep_prefixes:
-            to_delete.append(name)  # same app/arch, but a different (older) version
+            to_delete.append(asset)  # same app/arch, but a different (older) version
         # else: an app/arch we didn't rebuild this run -> leave it untouched
 
     if not to_delete:
@@ -133,11 +188,16 @@ def main() -> int:
 
     print(f"Found {len(to_delete)} superseded APK asset(s) to remove:")
     deleted = 0
-    for name in to_delete:
+    for asset in to_delete:
+        name = str(asset.get("name", ""))
+        asset_id = str(asset.get("id") or asset.get("apiUri", "")).strip()
+        # If gh gave us a URL instead of a bare id, extract the trailing number.
+        if asset_id and "/" in asset_id:
+            asset_id = asset_id.rstrip("/").rsplit("/", 1)[-1]
         if args.dry_run:
             print(f"  [dry-run] would delete: {name}")
         else:
-            if delete_asset(args.release, name):
+            if delete_asset(args.release, name, asset_id):
                 print(f"  🗑️  deleted: {name}")
                 deleted += 1
 
