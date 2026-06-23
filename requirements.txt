@@ -1,0 +1,4 @@
+boto3
+PyGithub
+beautifulsoup4
+curl-cffi
