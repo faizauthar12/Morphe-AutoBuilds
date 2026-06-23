@@ -293,20 +293,32 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
         # URL-encode the release_name to handle unicode characters like ․
         encoded_release_name = quote(release_name, safe='')
         encoded_name = quote(config['name'], safe='')
+        org = config.get('org', '')
+        encoded_org = quote(org, safe='')
         
         # Priority 1: With release_name and -release suffix (most specific)
-        url_patterns.append(f"{base_url}/apk/{config['org']}/{encoded_name}/{encoded_release_name}-{current_ver_str}-release/")
+        url_patterns.append(f"{base_url}/apk/{org}/{encoded_name}/{encoded_release_name}-{current_ver_str}-release/")
         
         # Priority 2: With app name and -release suffix
         if release_name != config['name']:
-            url_patterns.append(f"{base_url}/apk/{config['org']}/{encoded_name}/{encoded_name}-{current_ver_str}-release/")
+            url_patterns.append(f"{base_url}/apk/{org}/{encoded_name}/{encoded_name}-{current_ver_str}-release/")
         
-        # Priority 3: With release_name without -release
-        url_patterns.append(f"{base_url}/apk/{config['org']}/{encoded_name}/{encoded_release_name}-{current_ver_str}/")
+        # Priority 3: With org name only + -release suffix
+        # APKMirror often uses {org}-{version}-release for apps where name={org}-{org}
+        # e.g., name="instagram-instagram" but release slug is "instagram-430-..."
+        if org and org != release_name and org != config['name']:
+            url_patterns.append(f"{base_url}/apk/{org}/{encoded_name}/{encoded_org}-{current_ver_str}-release/")
         
-        # Priority 4: With app name without -release
+        # Priority 4: With release_name without -release
+        url_patterns.append(f"{base_url}/apk/{org}/{encoded_name}/{encoded_release_name}-{current_ver_str}/")
+        
+        # Priority 5: With app name without -release
         if release_name != config['name']:
-            url_patterns.append(f"{base_url}/apk/{config['org']}/{encoded_name}/{encoded_name}-{current_ver_str}/")
+            url_patterns.append(f"{base_url}/apk/{org}/{encoded_name}/{encoded_name}-{current_ver_str}/")
+        
+        # Priority 6: With org name only, without -release
+        if org and org != release_name and org != config['name']:
+            url_patterns.append(f"{base_url}/apk/{org}/{encoded_name}/{encoded_org}-{current_ver_str}/")
         
         # Remove duplicate patterns
         url_patterns = list(dict.fromkeys(url_patterns))
